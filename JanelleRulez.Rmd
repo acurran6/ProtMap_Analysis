@@ -1,0 +1,16 @@
+---
+title: "JanelleRulez"
+author: "Ashley M Curran"
+date: "9/11/2021"
+output: html_document
+---
+
+```{r}
+vim_data_native_v_PAD2 <- vim_data[,1:8]
+library(EnhancedVolcano)
+EnhancedVolcano(res,
+    lab = rownames(res),
+    x = 'log2FoldChange',
+    y = 'pvalue')
+```
+

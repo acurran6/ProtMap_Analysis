@@ -1,0 +1,1367 @@
+---
+title: "ProtMap Analysis"
+author: "Ashley M Curran"
+date: "11/08/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/ashleycurran/Desktop/ProtMap_Analysis/Data",echo = TRUE) #set wd for entire notebook here
+
+#first run install.packages("pacman") and library("pacman")
+pacman::p_load(tidyverse,readxl,knitr,ggplot2,EnhancedVolcano,multtest,mutoss,ggVennDiagram,writexl)
+
+```
+
+```{r, include=FALSE}
+
+load_scripts <- list.files(pattern="[.]R$", path="../Functions", full.names=TRUE)
+sapply(load_scripts, source, local = knitr::knit_global())
+
+```
+
+# Vimentin
+```{r vimentin data cleanup, include=FALSE}
+
+#IMPORTANT: for downstream code, you must remove all modifications from the Excel file in the "Modifications" column that are not deamidation (e.g., oxidation, carbamylation) due to poor spreadsheet design by well-meaning collaborators
+
+vim_data_full <- read_xlsx("CatBSH_digested_fibrinogen_vimentin_PAD4_results_072821.xlsx", sheet = "Vimentin_Peptides") #specify Excel doc and sheet containing peptides & abundances
+names(vim_data_full) <- str_replace_all(names(vim_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+vim_data_full <- subset(vim_data_full, Master_Protein_Accessions == "P08670") #subset the data.frame keeping only peptides from vimentin - accession number P08670 (replace with protein of interest)
+vim_data_full <- vim_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("P08670 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) %>% #Calculate peptide length
+    mutate(Cit = ifelse(grepl("Deamidated",Modifications),1,0)) %>% 
+    relocate(Cit, .after = Modifications) %>% 
+    group_by(Cit) 
+
+vim_data_full$generated_uid <- 1:nrow(vim_data_full) #add numeric index
+vim_data_full <- vim_data_full %>%
+    select(generated_uid, everything()) #move index to first column
+
+vim_data <- subset(vim_data_full,select = c("generated_uid", "Sequence", "Cit", "Native_Replicate_1", "Native_Replicate_2", "Native_Replicate_3","Native_Replicate_4", "PAD2-Citrullinated_Replicate_1", "PAD2-Citrullinated_Replicate_2", "PAD2-Citrullinated_Replicate_3", "PAD2-Citrullinated_Replicate_4", "PAD4-Citrullinated_Replicate_1", "PAD4-Citrullinated_Replicate_2", "PAD4-Citrullinated_Replicate_3", "PAD4-Citrullinated_Replicate_4")) #make new data.frame with only peptide sequences and abundances
+
+write_xlsx(list(vim_data = vim_data), "vim_data.xlsx")
+
+##Nat vs. PAD2
+
+vim_data_native_v_PAD2 <- vim_data[,c(1,3,4:11)] #subset native and PAD2 abundances;remove any rows containing NA values (or else fail t.test)
+vim_data_native_v_PAD2 <- vim_data_native_v_PAD2[rowSums(is.na(vim_data_native_v_PAD2) ) <=7, ]
+vim_data_native_v_PAD2[is.na(vim_data_native_v_PAD2)] <- 1
+
+vim_data_native_v_PAD2_t.test <- cbind(vim_data_native_v_PAD2$generated_uid, log10(vim_data_native_v_PAD2[,3:10])) #make data.frame with log10 transformed data for t.test
+
+vim_data_native_v_PAD2_t.test$p.value <- apply(vim_data_native_v_PAD2_t.test,1,function(x)  t.test(x[2:5],x[6:9],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD2)
+
+##Nat vs. PAD4
+
+vim_data_native_v_PAD4 <- vim_data[,c(1,3,4:7,12:15)] #subset native and PAD4 abundances;remove any rows containing NA values (or else fail t.test)
+vim_data_native_v_PAD4 <- vim_data_native_v_PAD4[rowSums(is.na(vim_data_native_v_PAD4) ) <=7, ]
+vim_data_native_v_PAD4[is.na(vim_data_native_v_PAD4)] <- 1
+
+#vim_data_native_v_PAD4 <- na.omit(vim_data[,c(1,3:6,11:14)]) #subset native and PAD4 abundances;remove any rows containing NA values (or else fail t.test)
+vim_data_native_v_PAD4_t.test <- cbind(vim_data_native_v_PAD4$generated_uid, log10(vim_data_native_v_PAD4[,3:10])) #make data.frame with log10 transformed data for t.test
+
+vim_data_native_v_PAD4_t.test$p.value <- apply(vim_data_native_v_PAD4_t.test,1,function(x)  t.test(x[2:5],x[6:9],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD4)
+
+##Nat vs. PAD2 t test
+
+vim_nat_PAD2_p.value_vector <- as.numeric(vim_data_native_v_PAD2_t.test$p.value)
+q_value <- multiple.down(vim_nat_PAD2_p.value_vector, alpha = 0.05)
+vim_data_native_v_PAD2_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+vim_data_native_v_PAD2_t.test$neg_log_q <- -(log10(vim_data_native_v_PAD2_t.test$q_value))
+
+vim_nat2 <- vim_data_native_v_PAD2[,3:6]
+vim_nat2$Nat2Mean <- rowMeans(vim_nat2)
+
+vim_PAD2 <- vim_data_native_v_PAD2[,7:10]
+vim_PAD2$PAD2Mean <- rowMeans(vim_PAD2)
+
+vim_data_native_v_PAD2$Nat2Mean <- vim_nat2$Nat2Mean
+vim_data_native_v_PAD2$PAD2Mean <- vim_PAD2$PAD2Mean
+
+vim_data_native_v_PAD2$foldchange <- vim_data_native_v_PAD2$PAD2Mean/vim_data_native_v_PAD2$Nat2Mean
+
+
+vim_data_native_v_PAD2$log2foldchange <- log2(vim_data_native_v_PAD2$PAD2Mean/vim_data_native_v_PAD2$Nat2Mean)
+
+##Nat vs. PAD4
+
+vim_nat_PAD4_p.value_vector <- as.numeric(vim_data_native_v_PAD4_t.test$p.value)
+q_value <- multiple.down(vim_nat_PAD4_p.value_vector, alpha = 0.05)
+vim_data_native_v_PAD4_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+vim_data_native_v_PAD4_t.test$neg_log_q <- -(log10(vim_data_native_v_PAD4_t.test$q_value))
+
+vim_nat4 <- vim_data_native_v_PAD4[,3:6]
+vim_nat4$Nat4Mean <- rowMeans(vim_nat4)
+
+vim_PAD4 <- vim_data_native_v_PAD4[,7:10]
+vim_PAD4$PAD4Mean <- rowMeans(vim_PAD4)
+
+vim_data_native_v_PAD4$Nat4Mean <- vim_nat4$Nat4Mean
+vim_data_native_v_PAD4$PAD4Mean <- vim_PAD4$PAD4Mean
+
+vim_data_native_v_PAD4$foldchange <- vim_data_native_v_PAD4$PAD4Mean/vim_data_native_v_PAD4$Nat4Mean
+
+
+vim_data_native_v_PAD4$log2foldchange <- log2(vim_data_native_v_PAD4$PAD4Mean/vim_data_native_v_PAD4$Nat4Mean)
+
+# vim_data_native_v_PAD2$log2foldchange <- log2(vim_data_native_v_PAD2$fold_change)
+
+# vim_native_v_PAD2_volcano <- as.data.frame(cbind(fold_change = log2(vim_native_v_PAD2_means$fold_change), neg_log_q = # vim_data_native_v_PAD2$neg_log_q))
+
+        #Positions_in_Master_Proteins = gsub("P08670 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+
+#t.test(vim_data_native_v_PAD2[1,1:3],vim_data_native_v_PAD2[1,4:6]) #t.test on first row only for test
+    
+```
+## Native vs PAD2-citrullinated Vimentin - Volcano Plots
+$$\\[0.25in]$$
+
+```{r vimentin mixed volcano plot PAD2, echo=FALSE}
+
+mixed_volcano_PAD2 <- as.data.frame(cbind(generated_uid = vim_data_native_v_PAD2$generated_uid, Cit = vim_data_native_v_PAD2$Cit, neg_log_q = vim_data_native_v_PAD2_t.test$neg_log_q, log2foldchange = vim_data_native_v_PAD2$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD2, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+vim_peptide_list_increased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+vim_peptide_list_decreased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+vim_peptide_list_nochange_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q <= 1.3 | (log2foldchange >= -1 & log2foldchange <= 1), select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+
+\clearpage
+
+## Native vs PAD4-citrullinated Vimentin - Volcano Plots
+
+$$\\[0.25in]$$ 
+
+```{r vimentin mixed volcano plot PAD4, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = vim_data_native_v_PAD4$generated_uid, Cit = vim_data_native_v_PAD4$Cit, neg_log_q = vim_data_native_v_PAD4_t.test$neg_log_q, log2foldchange = vim_data_native_v_PAD4$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+vim_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+vim_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+vim_peptide_list_nochange_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q <= 1.3 | (log2foldchange >= -1 & log2foldchange <= 1), select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+
+\clearpage
+
+```{r vimentin Venn Diagram, echo = FALSE}
+
+compare_Venn <- list(PAD2 = vim_peptide_list_increased_PAD2$generated_uid, PAD4 = vim_peptide_list_increased_PAD4$generated_uid)
+
+ggVennDiagram(compare_Venn)
+
+join <- inner_join(vim_peptide_list_increased_PAD2,vim_data, by = "generated_uid")
+```
+\clearpage
+
+## Native vs PAD2-citrullinated Vimentin - NetMHCII
+```{r vimentin PAD2 NetMHCII-2.3, include=FALSE}
+
+# Nat vs PAD2 Vimentin - pre-NetMHCII
+
+## Increased
+
+vim_peptide_list_increased_PAD2 <- merge(vim_peptide_list_increased_PAD2, vim_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+vim_peptide_list_increased_PAD2 <- vim_peptide_list_increased_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(vim_peptide_list_increased_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(vim_peptide_list_increased_PAD2$Mod_1), ncol = as.numeric(max(max(vim_peptide_list_increased_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- vim_peptide_list_increased_PAD2$Mod_1
+cit_mod_pos[,2] <- vim_peptide_list_increased_PAD2$Mod_2
+
+vim_peptide_list_increased_PAD2$Cit_Sequence <- citrullinate(vim_peptide_list_increased_PAD2$Sequence,cit_mod_pos)
+
+## Decreased
+
+vim_peptide_list_decreased_PAD2 <- merge(vim_peptide_list_decreased_PAD2, vim_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+vim_peptide_list_decreased_PAD2 <- vim_peptide_list_decreased_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(vim_peptide_list_decreased_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(vim_peptide_list_decreased_PAD2$Mod_1), ncol = as.numeric(max(max(vim_peptide_list_decreased_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- vim_peptide_list_decreased_PAD2$Mod_1
+cit_mod_pos[,2] <- vim_peptide_list_decreased_PAD2$Mod_2
+
+vim_peptide_list_decreased_PAD2$Cit_Sequence <- citrullinate(vim_peptide_list_decreased_PAD2$Sequence,cit_mod_pos)
+
+write_xlsx(list(vim_PAD2_increased = vim_peptide_list_increased_PAD2, vim_PAD2_decreased = vim_peptide_list_decreased_PAD2), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+    # netMHCII SE alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0404,DRB1_1001
+
+## No Change
+
+vim_peptide_list_nochange_PAD2 <- merge(vim_peptide_list_nochange_PAD2, vim_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+vim_peptide_list_nochange_PAD2 <- vim_peptide_list_nochange_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(vim_peptide_list_nochange_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(vim_peptide_list_nochange_PAD2$Mod_1), ncol = as.numeric(max(max(vim_peptide_list_nochange_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- vim_peptide_list_nochange_PAD2$Mod_1
+cit_mod_pos[,2] <- vim_peptide_list_nochange_PAD2$Mod_2
+
+vim_peptide_list_nochange_PAD2$Cit_Sequence <- citrullinate(vim_peptide_list_nochange_PAD2$Sequence,cit_mod_pos)
+
+write_xlsx(list(vim_PAD_nochange = vim_peptide_list_nochange_PAD2),"vim_PAD2_nochange.xlsx")
+
+# Nat vs PAD2 Vimentin - post-NetMHCII
+
+## Increased
+
+vim_increased_PAD2_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "vim_PAD2_incr")
+vim_increased_PAD2_NetMHCII <- vim_increased_PAD2_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    #group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+vim_increased_PAD2_high_affinity <- filter(vim_increased_PAD2_NetMHCII, affinity <= 500)
+
+#vim_increased_PAD2_NetMHCII_unique <- merge(summarise(vim_increased_PAD2_high_affinity, high_affinity_cores = n_distinct(core)), summarise(vim_increased_PAD2_NetMHCII, total_cores = n_distinct(core)))
+
+vim_increased_PAD2_unique_cores <- unique(vim_increased_PAD2_high_affinity$core)
+
+#vim_increased_PAD2_NetMHCII_unique <- vim_increased_PAD2_NetMHCII_unique %>%
+    #mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    #arrange(desc(SE))
+
+#Revert Q to R before searching original data for each core
+
+vim_increased_PAD2_high_affinity <- merge(vim_increased_PAD2_high_affinity, vim_peptide_list_increased_PAD2[,c("Cit","Mods_Num","Mod_1","Mod_2","pos")], by="pos")
+
+write_xlsx(list(vim_incr_PAD2_highaff  = vim_increased_PAD2_high_affinity),"vim_increased_PAD2_high_affinity.xlsx")
+
+vim_increased_PAD2_unique_cores_R_reverted <- read_xlsx("vim_increased_PAD2_high_affinity.xlsx", sheet = "vim_incr_PAD2_highaff")
+
+vim_increased_PAD2_unique_cores <- unique(vim_increased_PAD2_unique_cores_R_reverted$R_core)
+
+seq_list <- vim_data_full$Sequence
+
+#Run abundance function here
+
+vim_ <- core_abundance(seq_list,vim_increased_PAD2_unique_cores)
+
+#vim_increased_PAD2_unique_core_abundances <- abundances %>%
+    #mutate(difference = V3 - V2)
+
+## Decreased
+
+vim_decreased_PAD2_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "vim_PAD2_decr")
+vim_decreased_PAD2_NetMHCII <- vim_decreased_PAD2_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+vim_decreased_PAD2_high_affinity <- filter(vim_decreased_PAD2_NetMHCII, affinity <= 500)
+
+#vim_decreased_PAD2_NetMHCII_unique <- merge(summarise(vim_decreased_PAD2_high_affinity, high_affinity_cores = n_distinct(core)), summarise(vim_decreased_PAD2_NetMHCII, total_cores = n_distinct(core)))
+
+#vim_decreased_PAD2_NetMHCII_unique <- vim_decreased_PAD2_NetMHCII_unique %>%
+    #mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    #arrange(desc(SE))
+
+vim_decreased_PAD2_unique_cores <- unique(vim_decreased_PAD2_high_affinity$core)
+
+## FASTA sequence
+
+vim_fullseq_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "vim_seq")
+vim_fullseq_NetMHCII <- vim_fullseq_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+vim_fullseq_high_affinity <- filter(vim_fullseq_NetMHCII, affinity <= 500)
+
+vim_fullseq_NetMHCII_unique <- merge(summarise(vim_fullseq_high_affinity, high_affinity_cores = n_distinct(core)), summarise(vim_fullseq_NetMHCII, total_cores = n_distinct(core)))
+
+vim_fullseq_NetMHCII_unique <- vim_fullseq_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## GAPDH
+vim_fullseq_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "tet_seq")
+vim_fullseq_NetMHCII <- vim_fullseq_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+vim_fullseq_high_affinity <- filter(vim_fullseq_NetMHCII, affinity <= 500)
+
+vim_fullseq_NetMHCII_unique <- merge(summarise(vim_fullseq_high_affinity, high_affinity_cores = n_distinct(core)), summarise(vim_fullseq_NetMHCII, total_cores = n_distinct(core)))
+
+vim_fullseq_NetMHCII_unique <- vim_fullseq_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r vimentin PAD2 increased unique cores plot, echo= FALSE}
+
+ggplot(vim_increased_PAD2_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+
+```{r vimentin PAD2 decreased unique cores plot, echo= FALSE}
+
+ggplot(vim_decreased_PAD2_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+```{r vimentin fullseq unique cores plot, echo= FALSE}
+
+ggplot(vim_fullseq_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+
+
+## Native vs PAD4-citrullinated Vimentin - NetMHCII
+```{r vimentin PAD4 NetMHCII-2.3, include=FALSE}
+
+# Nat vs PAD4 Vimentin - pre-NetMHCII
+
+## Increased
+
+vim_peptide_list_increased_PAD4 <- merge(vim_peptide_list_increased_PAD4, vim_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+vim_peptide_list_increased_PAD4 <- vim_peptide_list_increased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(vim_peptide_list_increased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(vim_peptide_list_increased_PAD4$Mod_1), ncol = as.numeric(max(max(vim_peptide_list_increased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- vim_peptide_list_increased_PAD4$Mod_1
+cit_mod_pos[,2] <- vim_peptide_list_increased_PAD4$Mod_2
+
+vim_peptide_list_increased_PAD4$Cit_Sequence <- citrullinate(vim_peptide_list_increased_PAD4$Sequence,cit_mod_pos)
+
+## Decreased
+
+vim_peptide_list_decreased_PAD4 <- merge(vim_peptide_list_decreased_PAD4, vim_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+vim_peptide_list_decreased_PAD4 <- vim_peptide_list_decreased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(vim_peptide_list_decreased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+#cit_mod_pos <- matrix(nrow = length(vim_peptide_list_decreased_PAD4$Mod_1), ncol = as.numeric(max(max(vim_peptide_list_decreased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+#cit_mod_pos[,1] <- vim_peptide_list_decreased_PAD4$Mod_1
+#cit_mod_pos[,2] <- vim_peptide_list_decreased_PAD4$Mod_2
+
+#vim_peptide_list_decreased_PAD4$Cit_Sequence <- citrullinate(vim_peptide_list_decreased_PAD4$Sequence,cit_mod_pos)
+
+vim_peptide_list_decreased_PAD4$Cit_Sequence <- vim_peptide_list_decreased_PAD4$Sequence
+
+write_xlsx(list(vim_PAD4_increased = vim_peptide_list_increased_PAD4, vim_PAD4_decreased = vim_peptide_list_decreased_PAD4), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+
+# Nat vs PAD2 Vimentin - post-NetMHCII
+
+## Increased
+
+vim_increased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "vim_PAD4_incr")
+vim_increased_PAD4_NetMHCII <- vim_increased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+vim_increased_PAD4_high_affinity <- filter(vim_increased_PAD4_NetMHCII, affinity <= 500)
+
+vim_increased_PAD4_NetMHCII_unique <- merge(summarise(vim_increased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(vim_increased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+vim_increased_PAD4_NetMHCII_unique <- vim_increased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## Decreased
+
+vim_decreased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "vim_PAD4_decr")
+vim_decreased_PAD4_NetMHCII <- vim_decreased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+vim_decreased_PAD4_high_affinity <- filter(vim_decreased_PAD4_NetMHCII, affinity <= 500)
+
+vim_decreased_PAD4_NetMHCII_unique <- merge(summarise(vim_decreased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(vim_decreased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+vim_decreased_PAD4_NetMHCII_unique <- vim_decreased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r vimentin PAD4 increased unique cores plot, echo= FALSE}
+
+ggplot(vim_increased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+```{r vimentin PAD4 decreased unique cores plot, echo= FALSE}
+
+ggplot(vim_decreased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+# Fibrinogen
+```{r fibrinogen data cleanup, include=FALSE}
+fib_data_full <- read_xlsx("CatBSH_digested_fibrinogen_vimentin_PAD4_results_072821.xlsx", sheet = "Fibrinogen_Peptides") #specify Excel doc and sheet containing peptides & abundances
+names(fib_data_full) <- str_replace_all(names(fib_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+fib_data_full <- subset(fib_data_full, Master_Protein_Accessions == "P02671" | Master_Protein_Accessions == "P02675" | Master_Protein_Accessions == "P02679") #subset the data.frame keeping only peptides from fibrinogen - accession numbers P02671, P02675, and P02679 (replace with protein of interest)
+fib_data_full <- fib_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("P02671 ","",Positions_in_Master_Proteins)) %>%
+    mutate(Positions_in_Master_Proteins = gsub("P02675 ","",Positions_in_Master_Proteins)) %>%
+    mutate(Positions_in_Master_Proteins = gsub("P02679 ","",Positions_in_Master_Proteins)) %>%
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    #remove string referring to accession number from this column
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Master_Protein_Accessions,Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) %>% #Calculate peptide length
+    mutate(Cit = ifelse(grepl("Deamidated",Modifications),1,0)) %>% 
+    relocate(Cit, .after = Modifications) %>% 
+    group_by(Cit)
+
+fib_data_full$generated_uid <- 1:nrow(fib_data_full) #add numeric index
+fib_data_full <- fib_data_full %>%
+    select(generated_uid, everything()) #move index to first column
+
+fib_data <- subset(fib_data_full,select = c("generated_uid", "Sequence", "Cit", "Native_Replicate_1", "Native_Replicate_2", "Native_Replicate_3","Native_Replicate_4", "PAD2-Citrullinated_Replicate_1", "PAD2-Citrullinated_Replicate_2", "PAD2-Citrullinated_Replicate_3", "PAD2-Citrullinated_Replicate_4", "PAD4-Citrullinated_Replicate_1", "PAD4-Citrullinated_Replicate_2", "PAD4-Citrullinated_Replicate_3", "PAD4-Citrullinated_Replicate_4")) #make new data.frame with only peptide sequences and abundances
+    
+##Nat vs. PAD2
+
+fib_data_native_v_PAD2 <- fib_data[,c(1,3,4:11)] #subset native and PAD2 abundances;remove any rows containing NA values (or else fail t.test)
+fib_data_native_v_PAD2 <- fib_data_native_v_PAD2[rowSums( is.na(fib_data_native_v_PAD2) ) <=7, ]
+fib_data_native_v_PAD2[is.na(fib_data_native_v_PAD2)] <- 1
+
+fib_data_native_v_PAD2_t.test <- cbind(fib_data_native_v_PAD2$generated_uid, log10(fib_data_native_v_PAD2[,3:10])) #make data.frame with log10 transformed data for t.test
+
+fib_data_native_v_PAD2_t.test$p.value <- apply(fib_data_native_v_PAD2_t.test,1,function(x)  t.test(x[2:5],x[6:9],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD2)
+
+##Nat vs. PAD4
+
+fib_data_native_v_PAD4 <- fib_data[,c(1,3,4:7,12:15)] #subset native and PAD4 abundances;remove any rows containing NA values (or else fail t.test)
+fib_data_native_v_PAD4 <- fib_data_native_v_PAD4[rowSums( is.na(fib_data_native_v_PAD4) ) <=7, ]
+fib_data_native_v_PAD4[is.na(fib_data_native_v_PAD4)] <- 1
+
+fib_data_native_v_PAD4_t.test <- cbind(fib_data_native_v_PAD4$generated_uid, log10(fib_data_native_v_PAD4[,3:10])) #make data.frame with log10 transformed data for t.test
+
+fib_data_native_v_PAD4_t.test$p.value <- apply(fib_data_native_v_PAD4_t.test,1,function(x)  t.test(x[2:5],x[6:9],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD4)
+
+##Nat vs. PAD2
+
+fib_nat_PAD2_p.value_vector <- as.numeric(fib_data_native_v_PAD2_t.test$p.value)
+q_value <- multiple.down(fib_nat_PAD2_p.value_vector, alpha = 0.05)
+fib_data_native_v_PAD2_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+fib_data_native_v_PAD2_t.test$neg_log_q <- -(log10(fib_data_native_v_PAD2_t.test$q_value))
+
+fib_nat2 <- fib_data_native_v_PAD2[,3:6]
+fib_nat2$Nat2Mean <- rowMeans(fib_nat2)
+
+fib_PAD2 <- fib_data_native_v_PAD2[,7:10]
+fib_PAD2$PAD2Mean <- rowMeans(fib_PAD2)
+
+fib_data_native_v_PAD2$Nat2Mean <- fib_nat2$Nat2Mean
+fib_data_native_v_PAD2$PAD2Mean <- fib_PAD2$PAD2Mean
+
+fib_data_native_v_PAD2$foldchange <- fib_data_native_v_PAD2$PAD2Mean/fib_data_native_v_PAD2$Nat2Mean
+
+fib_data_native_v_PAD2$log2foldchange <- log2(fib_data_native_v_PAD2$PAD2Mean/fib_data_native_v_PAD2$Nat2Mean)
+
+##Nat vs. PAD4
+
+fib_nat_PAD4_p.value_vector <- as.numeric(fib_data_native_v_PAD4_t.test$p.value)
+q_value <- multiple.down(fib_nat_PAD4_p.value_vector, alpha = 0.05)
+fib_data_native_v_PAD4_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+fib_data_native_v_PAD4_t.test$neg_log_q <- -(log10(fib_data_native_v_PAD4_t.test$q_value))
+
+fib_nat4 <- fib_data_native_v_PAD4[,3:6]
+fib_nat4$Nat4Mean <- rowMeans(fib_nat4)
+
+fib_PAD4 <- fib_data_native_v_PAD4[,7:10]
+fib_PAD4$PAD4Mean <- rowMeans(fib_PAD4)
+
+fib_data_native_v_PAD4$Nat4Mean <- fib_nat4$Nat4Mean
+fib_data_native_v_PAD4$PAD4Mean <- fib_PAD4$PAD4Mean
+
+fib_data_native_v_PAD4$foldchange <- fib_data_native_v_PAD4$PAD4Mean/fib_data_native_v_PAD4$Nat4Mean
+
+fib_data_native_v_PAD4$log2foldchange <- log2(fib_data_native_v_PAD4$PAD4Mean/fib_data_native_v_PAD4$Nat4Mean)
+    
+```
+
+## Native vs PAD2-citrullinated Fibrinogen - Volcano Plots
+$$\\[0.25in]$$
+
+```{r fibrinogen mixed volcano plot, echo=FALSE}
+
+mixed_volcano_PAD2 <- as.data.frame(cbind(generated_uid = fib_data_native_v_PAD2$generated_uid, Cit = fib_data_native_v_PAD2$Cit, neg_log_q = fib_data_native_v_PAD2_t.test$neg_log_q, log2foldchange = fib_data_native_v_PAD2$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD2, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+fib_peptide_list_increased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+fib_peptide_list_decreased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+\clearpage
+
+## Native vs PAD4-citrullinated Fibrinogen - Volcano Plots
+
+$$\\[0.25in]$$ 
+
+```{r fibrinogen mixed volcano plot PAD4, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = fib_data_native_v_PAD4$generated_uid, Cit = fib_data_native_v_PAD4$Cit, neg_log_q = fib_data_native_v_PAD4_t.test$neg_log_q, log2foldchange = fib_data_native_v_PAD4$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+fib_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+fib_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+
+\clearpage
+
+```{r fibrinogen Venn Diagram, echo = FALSE}
+
+compare_Venn <- list(PAD2 = fib_peptide_list_increased_PAD2$generated_uid, PAD4 = fib_peptide_list_increased_PAD4$generated_uid)
+
+ggVennDiagram(compare_Venn)
+
+join <- inner_join(fib_peptide_list_increased_PAD2,vim_data, by = "generated_uid")
+```
+\clearpage
+
+## Native vs PAD2-citrullinated Fibrinogen - NetMHCII
+
+```{r fibrinogen PAD2 NetMHCII-2.3, include=FALSE}
+
+# Nat vs PAD2 Fibrinogen - pre-NetMHCII
+
+## Increased
+
+fib_peptide_list_increased_PAD2 <- merge(fib_peptide_list_increased_PAD2, fib_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+fib_peptide_list_increased_PAD2 <- fib_peptide_list_increased_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(fib_peptide_list_increased_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(fib_peptide_list_increased_PAD2$Mod_1), ncol = as.numeric(max(max(fib_peptide_list_increased_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- fib_peptide_list_increased_PAD2$Mod_1
+cit_mod_pos[,2] <- fib_peptide_list_increased_PAD2$Mod_2
+
+fib_peptide_list_increased_PAD2$Cit_Sequence <- citrullinate(fib_peptide_list_increased_PAD2$Sequence,cit_mod_pos)
+
+## Decreased
+
+fib_peptide_list_decreased_PAD2 <- merge(fib_peptide_list_decreased_PAD2, fib_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+fib_peptide_list_decreased_PAD2 <- fib_peptide_list_decreased_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(fib_peptide_list_decreased_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(fib_peptide_list_decreased_PAD2$Mod_1), ncol = as.numeric(max(max(fib_peptide_list_decreased_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- fib_peptide_list_decreased_PAD2$Mod_1
+cit_mod_pos[,2] <- fib_peptide_list_decreased_PAD2$Mod_2
+
+fib_peptide_list_decreased_PAD2$Cit_Sequence <- citrullinate(fib_peptide_list_decreased_PAD2$Sequence,cit_mod_pos)
+
+write_xlsx(list(fib_PAD2_increased = fib_peptide_list_increased_PAD2, fib_PAD2_decreased = fib_peptide_list_decreased_PAD2), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+
+# Nat vs PAD2 Fibrinogen - post-NetMHCII
+
+## Increased
+
+fib_increased_PAD2_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "fib_PAD2_incr")
+fib_increased_PAD2_NetMHCII <- fib_increased_PAD2_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+fib_increased_PAD2_high_affinity <- filter(fib_increased_PAD2_NetMHCII, affinity <= 500)
+
+fib_increased_PAD2_NetMHCII_unique <- merge(summarise(fib_increased_PAD2_high_affinity, high_affinity_cores = n_distinct(core)), summarise(fib_increased_PAD2_NetMHCII, total_cores = n_distinct(core)))
+
+fib_increased_PAD2_NetMHCII_unique <- fib_increased_PAD2_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## Decreased
+
+fib_decreased_PAD2_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "fib_PAD2_decr")
+fib_decreased_PAD2_NetMHCII <- fib_decreased_PAD2_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+fib_decreased_PAD2_high_affinity <- filter(fib_decreased_PAD2_NetMHCII, affinity <= 500)
+
+fib_decreased_PAD2_NetMHCII_unique <- merge(summarise(fib_decreased_PAD2_high_affinity, high_affinity_cores = n_distinct(core)), summarise(fib_decreased_PAD2_NetMHCII, total_cores = n_distinct(core)))
+
+fib_decreased_PAD2_NetMHCII_unique <- fib_decreased_PAD2_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r fibrinogen PAD2 increased unique cores plot, echo= FALSE}
+
+ggplot(fib_increased_PAD2_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+```{r fibrinogen PAD2 decreased unique cores plot, echo= FALSE}
+
+ggplot(fib_decreased_PAD2_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+## Native vs PAD4-citrullinated Fibrinogen - NetMHCII
+
+```{r fibrinogen PAD4 NetMHCII-2.3, include=FALSE}
+
+# Nat vs PAD4 Fibrinogen - pre-NetMHCII
+
+## Increased
+
+fib_peptide_list_increased_PAD4 <- merge(fib_peptide_list_increased_PAD4, fib_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+fib_peptide_list_increased_PAD4 <- fib_peptide_list_increased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(fib_peptide_list_increased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(fib_peptide_list_increased_PAD4$Mod_1), ncol = as.numeric(max(max(fib_peptide_list_increased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- fib_peptide_list_increased_PAD4$Mod_1
+cit_mod_pos[,2] <- fib_peptide_list_increased_PAD4$Mod_2
+
+fib_peptide_list_increased_PAD4$Cit_Sequence <- citrullinate(fib_peptide_list_increased_PAD4$Sequence,cit_mod_pos)
+
+## Decreased
+
+fib_peptide_list_decreased_PAD4 <- merge(fib_peptide_list_decreased_PAD4, fib_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+fib_peptide_list_decreased_PAD4 <- fib_peptide_list_decreased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(fib_peptide_list_decreased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(fib_peptide_list_decreased_PAD4$Mod_1), ncol = as.numeric(max(max(fib_peptide_list_decreased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- fib_peptide_list_decreased_PAD4$Mod_1
+cit_mod_pos[,2] <- fib_peptide_list_decreased_PAD4$Mod_2
+
+fib_peptide_list_decreased_PAD4$Cit_Sequence <- citrullinate(fib_peptide_list_decreased_PAD4$Sequence,cit_mod_pos)
+
+fib_peptide_list_decreased_PAD4$Cit_Sequence <- fib_peptide_list_decreased_PAD4$Sequence
+
+write_xlsx(list(fib_PAD4_increased = fib_peptide_list_increased_PAD4, fib_PAD4_decreased = fib_peptide_list_decreased_PAD4), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+
+# Nat vs PAD2 Fibrinogen - post-NetMHCII
+
+## Increased
+
+fib_increased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "fib_PAD4_incr")
+fib_increased_PAD4_NetMHCII <- fib_increased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+fib_increased_PAD4_high_affinity <- filter(fib_increased_PAD4_NetMHCII, affinity <= 500)
+
+fib_increased_PAD4_NetMHCII_unique <- merge(summarise(fib_increased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(fib_increased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+fib_increased_PAD4_NetMHCII_unique <- fib_increased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## Decreased
+
+fib_decreased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "fib_PAD4_decr")
+fib_decreased_PAD4_NetMHCII <- fib_decreased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+fib_decreased_PAD4_high_affinity <- filter(fib_decreased_PAD4_NetMHCII, affinity <= 500)
+
+fib_decreased_PAD4_NetMHCII_unique <- merge(summarise(fib_decreased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(fib_decreased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+fib_decreased_PAD4_NetMHCII_unique <- fib_decreased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r fibrinogen PAD4 increased unique cores plot, echo= FALSE}
+
+ggplot(fib_increased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+```{r fibrinogen PAD4 decreased unique cores plot, echo= FALSE}
+
+ggplot(fib_decreased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+# PAD4
+```{r PAD4 data cleanup, include=FALSE}
+PAD4_data_full <- read_xlsx("CatBSH_digested_fibrinogen_vimentin_PAD4_results_072821.xlsx", sheet = "PAD4_Peptides") #specify Excel doc and sheet containing peptides & abundances
+names(PAD4_data_full) <- str_replace_all(names(PAD4_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+PAD4_data_full <- subset(PAD4_data_full, Master_Protein_Accessions == "Q9UM07") #subset the data.frame keeping only peptides from vimentin - accession number P08670 (replace with protein of interest)
+PAD4_data_full <- PAD4_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("Q9UM07 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) %>% #Calculate peptide length
+    mutate(Cit = ifelse(grepl("Deamidated",Modifications),1,0)) %>% 
+    relocate(Cit, .after = Modifications) %>% #Calculate peptide length
+    group_by(Cit)
+
+PAD4_data_full$generated_uid <- 1:nrow(PAD4_data_full) #add numeric index
+PAD4_data_full <- PAD4_data_full %>%
+    select(generated_uid, everything()) #move index to first column
+
+PAD4_data <- subset(PAD4_data_full,select = c("generated_uid", "Sequence", "Cit", "Native_Replicate_1", "Native_Replicate_2", "Native_Replicate_3","Native_Replicate_4", "Citrullinated_Replicate_1", "Citrullinated_Replicate_2", "Citrullinated_Replicate_3", "Citrullinated_Replicate_4")) #make new data.frame with only peptide sequences and abundances
+    
+##Nat vs. Auto-cit
+
+PAD4_data_native_v_auto <- PAD4_data[,c(1,3,4:11)] #subset native and auto-cit abundances;remove any rows containing NA values (or else fail t.test)
+PAD4_data_native_v_auto <- PAD4_data_native_v_auto[rowSums( is.na(PAD4_data_native_v_auto) ) <=7, ]
+PAD4_data_native_v_auto[is.na(PAD4_data_native_v_auto)] <- 1
+
+PAD4_data_native_v_auto_t.test <- cbind(PAD4_data_native_v_auto$generated_uid, log10(PAD4_data_native_v_auto[,3:10])) #make data.frame with log10 transformed data for t.test
+
+PAD4_data_native_v_auto_t.test$p.value <- apply(PAD4_data_native_v_auto_t.test,1,function(x)  t.test(x[2:5],x[6:9],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. auto-cit)
+
+PAD4_nat_auto_p.value_vector <- as.numeric(PAD4_data_native_v_auto_t.test$p.value)
+q_value <- multiple.down(PAD4_nat_auto_p.value_vector, alpha = 0.05)
+PAD4_data_native_v_auto_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+PAD4_data_native_v_auto_t.test$neg_log_q <- -(log10(PAD4_data_native_v_auto_t.test$q_value))
+
+PAD4_nat <- PAD4_data_native_v_auto[,3:6]
+PAD4_nat$NatMean <- rowMeans(PAD4_nat)
+
+PAD4_auto <- PAD4_data_native_v_auto[,7:10]
+PAD4_auto$AutoMean <- rowMeans(PAD4_auto)
+
+PAD4_data_native_v_auto$NatMean <- PAD4_nat$NatMean
+PAD4_data_native_v_auto$AutoMean <- PAD4_auto$AutoMean
+
+PAD4_data_native_v_auto$foldchange <- PAD4_data_native_v_auto$AutoMean/PAD4_data_native_v_auto$NatMean
+
+PAD4_data_native_v_auto$log2foldchange <- log2(PAD4_data_native_v_auto$AutoMean/PAD4_data_native_v_auto$NatMean)
+    
+```
+
+## Native vs Auto-citrullinated PAD4 - Volcano Plots
+$$\\[0.25in]$$
+
+```{r PAD4 mixed volcano plot, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = PAD4_data_native_v_auto$generated_uid, Cit = PAD4_data_native_v_auto$Cit, neg_log_q = PAD4_data_native_v_auto_t.test$neg_log_q, log2foldchange = PAD4_data_native_v_auto$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+PAD4_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+PAD4_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+\clearpage
+
+## Native vs Auto-citrullinated PAD4 - NetMHCII
+
+```{r PAD4 NetMHCII-2.3, include=FALSE}
+
+# Nat vs Auto-citrullinated PAD4 - pre-NetMHCII
+
+## Increased
+
+PAD4_peptide_list_increased_PAD4 <- merge(PAD4_peptide_list_increased_PAD4, PAD4_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+PAD4_peptide_list_increased_PAD4 <- PAD4_peptide_list_increased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(PAD4_peptide_list_increased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(PAD4_peptide_list_increased_PAD4$Mod_1), ncol = as.numeric(max(max(PAD4_peptide_list_increased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- PAD4_peptide_list_increased_PAD4$Mod_1
+cit_mod_pos[,2] <- PAD4_peptide_list_increased_PAD4$Mod_2
+
+PAD4_peptide_list_increased_PAD4$Cit_Sequence <- citrullinate(PAD4_peptide_list_increased_PAD4$Sequence,cit_mod_pos)
+
+## Decreased
+
+PAD4_peptide_list_decreased_PAD4 <- merge(PAD4_peptide_list_decreased_PAD4, fib_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+PAD4_peptide_list_decreased_PAD4 <- PAD4_peptide_list_decreased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(PAD4_peptide_list_decreased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+#cit_mod_pos <- matrix(nrow = length(PAD4_peptide_list_decreased_PAD4$Mod_1), ncol = as.numeric(max(max(PAD4_peptide_list_decreased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+#cit_mod_pos[,1] <- PAD4_peptide_list_decreased_PAD4$Mod_1
+#cit_mod_pos[,2] <- PAD4_peptide_list_decreased_PAD4$Mod_2
+
+#PAD4_peptide_list_decreased_PAD4$Cit_Sequence <- citrullinate(PAD4_peptide_list_decreased_PAD4$Sequence,cit_mod_pos)
+
+write_xlsx(list(PAD4_PAD2_increased = PAD4_peptide_list_increased_PAD4, PAD4_PAD2_decreased = PAD4_peptide_list_decreased_PAD4), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+
+# Nat vs Auto-citrullinated PAD4 - post-NetMHCII
+
+## Increased
+
+PAD4_increased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "PAD4_incr")
+PAD4_increased_PAD4_NetMHCII <- PAD4_increased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+PAD4_increased_PAD4_high_affinity <- filter(PAD4_increased_PAD4_NetMHCII, affinity <= 500)
+
+PAD4_increased_PAD4_NetMHCII_unique <- merge(summarise(PAD4_increased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(PAD4_increased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+PAD4_increased_PAD4_NetMHCII_unique <- PAD4_increased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## Decreased
+
+PAD4_decreased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "PAD4_decr")
+PAD4_decreased_PAD4_NetMHCII <- PAD4_decreased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+PAD4_decreased_PAD4_high_affinity <- filter(PAD4_decreased_PAD4_NetMHCII, affinity <= 500)
+
+PAD4_decreased_PAD4_NetMHCII_unique <- merge(summarise(PAD4_decreased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(PAD4_decreased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+PAD4_decreased_PAD4_NetMHCII_unique <- PAD4_decreased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r PAD4 increased unique cores plot, echo= FALSE}
+
+ggplot(PAD4_increased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+```{r PAD4 decreased unique cores plot, echo= FALSE}
+
+ggplot(PAD4_decreased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+# RA33
+```{r RA33 data cleanup, include=FALSE}
+RA33_data_full <- read_xlsx("CatBSH_digested_RA33_results_042921.xlsx", sheet = "Peptides") #specify Excel doc and sheet containing peptides & abundances
+names(RA33_data_full) <- str_replace_all(names(RA33_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+RA33_data_full <- subset(RA33_data_full, Master_Protein_Accessions == "P22626") #subset the data.frame keeping only peptides from vimentin - accession number P22626 (replace with protein of interest)
+RA33_data_full <- RA33_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("P22626 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) %>% #Calculate peptide length
+    mutate(Cit = ifelse(grepl("Deamidated",Modifications),1,0)) %>% 
+    relocate(Cit, .after = Modifications) %>% 
+    group_by(Cit)
+
+RA33_data_full$generated_uid <- 1:nrow(RA33_data_full) #add numeric index
+RA33_data_full <- RA33_data_full %>%
+    select(generated_uid, everything()) #move index to first column
+
+RA33_data <- subset(RA33_data_full,select = c("generated_uid", "Sequence", "Cit", "Native_Replicate_1", "Native_Replicate_2", "Native_Replicate_3","Native_Replicate_4", "Native_Replicate_5","Native_Replicate_6", "PAD2-Citrullinated_Replicate_1", "PAD2-Citrullinated_Replicate_2", "PAD2-Citrullinated_Replicate_3", "PAD2-Citrullinated_Replicate_4", "PAD2-Citrullinated_Replicate_5", "PAD2-Citrullinated_Replicate_6", "PAD4-Citrullinated_Replicate_1", "PAD4-Citrullinated_Replicate_2", "PAD4-Citrullinated_Replicate_3", "PAD4-Citrullinated_Replicate_4", "PAD4-Citrullinated_Replicate_5", "PAD4-Citrullinated_Replicate_6")) #make new data.frame with only peptide sequences and abundances
+
+##Nat vs. PAD2
+
+RA33_data_native_v_PAD2 <- RA33_data[,c(1,3,4:21)] #subset native and PAD2 abundances;remove any rows containing NA values (or else fail t.test)
+RA33_data_native_v_PAD2 <- RA33_data_native_v_PAD2[rowSums( is.na(RA33_data_native_v_PAD2) ) <=11, ]
+RA33_data_native_v_PAD2[is.na(RA33_data_native_v_PAD2)] <- 1
+
+RA33_data_native_v_PAD2_t.test <- cbind(RA33_data_native_v_PAD2$generated_uid, log10(RA33_data_native_v_PAD2[,3:14])) #make data.frame with log10 transformed data for t.test
+
+RA33_data_native_v_PAD2_t.test$p.value <- apply(RA33_data_native_v_PAD2_t.test,1,function(x)  t.test(x[2:7],x[8:13],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD2)
+
+##Nat vs. PAD4
+
+RA33_data_native_v_PAD4 <- RA33_data[,c(1,3,4:9,16:21)] #subset native and PAD4 abundances;remove any rows containing NA values (or else fail t.test)
+RA33_data_native_v_PAD4 <- RA33_data_native_v_PAD4[rowSums( is.na(RA33_data_native_v_PAD4) ) <=11, ]
+RA33_data_native_v_PAD4[is.na(RA33_data_native_v_PAD4)] <- 1
+
+RA33_data_native_v_PAD4_t.test <- cbind(RA33_data_native_v_PAD4$generated_uid, log10(RA33_data_native_v_PAD4[,3:14])) #make data.frame with log10 transformed data for t.test
+
+RA33_data_native_v_PAD4_t.test$p.value <- apply(RA33_data_native_v_PAD4_t.test,1,function(x)  t.test(x[2:7],x[8:13],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD4)
+
+##Nat vs. PAD2 t test
+
+RA33_nat_PAD2_p.value_vector <- as.numeric(RA33_data_native_v_PAD2_t.test$p.value)
+q_value <- multiple.down(RA33_nat_PAD2_p.value_vector, alpha = 0.05)
+RA33_data_native_v_PAD2_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+RA33_data_native_v_PAD2_t.test$neg_log_q <- -(log10(RA33_data_native_v_PAD2_t.test$q_value))
+
+RA33_nat2 <- RA33_data_native_v_PAD2[,3:8]
+RA33_nat2$Nat2Mean <- rowMeans(RA33_nat2)
+
+RA33_PAD2 <- RA33_data_native_v_PAD2[,9:14]
+RA33_PAD2$PAD2Mean <- rowMeans(RA33_PAD2)
+
+RA33_data_native_v_PAD2$Nat2Mean <- RA33_nat2$Nat2Mean
+RA33_data_native_v_PAD2$PAD2Mean <- RA33_PAD2$PAD2Mean
+
+RA33_data_native_v_PAD2$foldchange <- RA33_data_native_v_PAD2$PAD2Mean/RA33_data_native_v_PAD2$Nat2Mean
+
+
+RA33_data_native_v_PAD2$log2foldchange <- log2(RA33_data_native_v_PAD2$PAD2Mean/RA33_data_native_v_PAD2$Nat2Mean)
+
+##Nat vs. PAD4
+
+RA33_nat_PAD4_p.value_vector <- as.numeric(RA33_data_native_v_PAD4_t.test$p.value)
+q_value <- multiple.down(RA33_nat_PAD4_p.value_vector, alpha = 0.05)
+RA33_data_native_v_PAD4_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+RA33_data_native_v_PAD4_t.test$neg_log_q <- -(log10(RA33_data_native_v_PAD4_t.test$q_value))
+
+RA33_nat4 <- RA33_data_native_v_PAD4[,3:8]
+RA33_nat4$Nat4Mean <- rowMeans(RA33_nat4)
+
+RA33_PAD4 <- RA33_data_native_v_PAD4[,9:14]
+RA33_PAD4$PAD4Mean <- rowMeans(RA33_PAD4)
+
+RA33_data_native_v_PAD4$Nat4Mean <- RA33_nat4$Nat4Mean
+RA33_data_native_v_PAD4$PAD4Mean <- RA33_PAD4$PAD4Mean
+
+RA33_data_native_v_PAD4$foldchange <- RA33_data_native_v_PAD4$PAD4Mean/RA33_data_native_v_PAD4$Nat4Mean
+
+
+RA33_data_native_v_PAD4$log2foldchange <- log2(RA33_data_native_v_PAD4$PAD4Mean/RA33_data_native_v_PAD4$Nat4Mean)
+    
+```
+
+## Native vs PAD2-citrullinated RA33 - Volcano Plots
+$$\\[0.25in]$$
+
+```{r RA33 mixed volcano plot PAD2, echo=FALSE}
+
+mixed_volcano_PAD2 <- as.data.frame(cbind(generated_uid = RA33_data_native_v_PAD2$generated_uid, Cit = RA33_data_native_v_PAD2$Cit, neg_log_q = RA33_data_native_v_PAD2_t.test$neg_log_q, log2foldchange = RA33_data_native_v_PAD2$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD2, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+RA33_peptide_list_increased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+RA33_peptide_list_decreased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+\clearpage
+
+## Native vs PAD4-citrullinated RA33 - Volcano Plots
+
+$$\\[0.25in]$$ 
+
+```{r RA33 mixed volcano plot PAD4, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = RA33_data_native_v_PAD4$generated_uid, Cit = RA33_data_native_v_PAD4$Cit, neg_log_q = RA33_data_native_v_PAD4_t.test$neg_log_q, log2foldchange = RA33_data_native_v_PAD4$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q, color=as.factor(Cit))) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="#00AFBB") + geom_hline(yintercept=-log10(0.05), col="#00AFBB") + 
+    scale_color_manual(values = c("1" = "#FC4E07","0" = "grey")) + theme(legend.position = "none")
+
+RA33_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+RA33_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,Cit,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+
+\clearpage
+
+```{r RA33 Venn Diagram, echo = FALSE}
+
+compare_Venn <- list(PAD2 = RA33_peptide_list_increased_PAD2$generated_uid, PAD4 = RA33_peptide_list_increased_PAD4$generated_uid)
+
+ggVennDiagram(compare_Venn)
+
+```
+\clearpage
+
+## Native vs PAD2-citrullinated RA33 - NetMHCII
+```{r RA33 PAD2 NetMHCII-2.3, include=FALSE}
+
+# Nat vs PAD2 RA33 - pre-NetMHCII
+
+## Increased
+
+RA33_peptide_list_increased_PAD2 <- merge(RA33_peptide_list_increased_PAD2, RA33_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+RA33_peptide_list_increased_PAD2 <- RA33_peptide_list_increased_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(RA33_peptide_list_increased_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2","Mod_3")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Mod_3 = as.numeric(gsub("R","",Mod_3))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(RA33_peptide_list_increased_PAD2$Mod_1), ncol = as.numeric(max(max(RA33_peptide_list_increased_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- RA33_peptide_list_increased_PAD2$Mod_1
+cit_mod_pos[,2] <- RA33_peptide_list_increased_PAD2$Mod_2
+
+RA33_peptide_list_increased_PAD2$Cit_Sequence <- citrullinate(RA33_peptide_list_increased_PAD2$Sequence,cit_mod_pos)
+
+## Decreased
+
+RA33_peptide_list_decreased_PAD2 <- merge(RA33_peptide_list_decreased_PAD2, RA33_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+RA33_peptide_list_decreased_PAD2 <- RA33_peptide_list_decreased_PAD2 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(RA33_peptide_list_decreased_PAD2)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2","Mod_3")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Mod_3 = as.numeric(gsub("R","",Mod_3))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(RA33_peptide_list_decreased_PAD2$Mod_1), ncol = as.numeric(max(max(RA33_peptide_list_decreased_PAD2$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- RA33_peptide_list_decreased_PAD2$Mod_1
+cit_mod_pos[,2] <- RA33_peptide_list_decreased_PAD2$Mod_2
+
+RA33_peptide_list_decreased_PAD2$Cit_Sequence <- citrullinate(RA33_peptide_list_decreased_PAD2$Sequence,cit_mod_pos)
+
+write_xlsx(list(RA33_PAD2_increased = vim_peptide_list_increased_PAD2, RA33_PAD2_decreased = RA33_peptide_list_decreased_PAD2), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+
+# Nat vs PAD2 Vimentin - post-NetMHCII
+
+## Increased
+
+RA33_increased_PAD2_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "RA33_PAD2_incr")
+RA33_increased_PAD2_NetMHCII <- RA33_increased_PAD2_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+RA33_increased_PAD2_high_affinity <- filter(RA33_increased_PAD2_NetMHCII, affinity <= 500)
+
+RA33_increased_PAD2_NetMHCII_unique <- merge(summarise(RA33_increased_PAD2_high_affinity, high_affinity_cores = n_distinct(core)), summarise(RA33_increased_PAD2_NetMHCII, total_cores = n_distinct(core)))
+
+RA33_increased_PAD2_NetMHCII_unique <- RA33_increased_PAD2_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## Decreased
+
+RA33_decreased_PAD2_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "RA33_PAD2_decr")
+RA33_decreased_PAD2_NetMHCII <- RA33_decreased_PAD2_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+RA33_decreased_PAD2_high_affinity <- filter(RA33_decreased_PAD2_NetMHCII, affinity <= 500)
+
+RA33_decreased_PAD2_NetMHCII_unique <- merge(summarise(RA33_decreased_PAD2_high_affinity, high_affinity_cores = n_distinct(core)), summarise(RA33_decreased_PAD2_NetMHCII, total_cores = n_distinct(core)))
+
+RA33_decreased_PAD2_NetMHCII_unique <- RA33_decreased_PAD2_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r RA33 PAD2 increased unique cores plot, echo= FALSE}
+
+ggplot(RA33_increased_PAD2_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+```{r RA33 PAD2 decreased unique cores plot, echo= FALSE}
+
+ggplot(RA33_decreased_PAD2_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+## Native vs PAD4-citrullinated RA33 - NetMHCII
+```{r RA33 PAD4 NetMHCII-2.3, include=FALSE}
+
+# Nat vs PAD4 RA33 - pre-NetMHCII
+
+## Increased
+
+RA33_peptide_list_increased_PAD4 <- merge(RA33_peptide_list_increased_PAD4, RA33_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+RA33_peptide_list_increased_PAD4 <- RA33_peptide_list_increased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(RA33_peptide_list_increased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2","Mod_3")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Mod_3 = as.numeric(gsub("R","",Mod_3))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(RA33_peptide_list_increased_PAD4$Mod_1), ncol = as.numeric(max(max(RA33_peptide_list_increased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- RA33_peptide_list_increased_PAD4$Mod_1
+cit_mod_pos[,2] <- RA33_peptide_list_increased_PAD4$Mod_2
+
+RA33_peptide_list_increased_PAD4$Cit_Sequence <- citrullinate(RA33_peptide_list_increased_PAD4$Sequence,cit_mod_pos)
+
+## Decreased
+
+RA33_peptide_list_decreased_PAD4 <- merge(RA33_peptide_list_decreased_PAD4, RA33_data_full[, c("generated_uid", "Sequence","Modifications")], by="generated_uid")
+
+RA33_peptide_list_decreased_PAD4 <- RA33_peptide_list_decreased_PAD4 %>%
+    #mutate(Annotated_Sequence = gsub("\\[|\\]|\\.|\\-","",Annotated_Sequence)) %>%
+    mutate(pos = 1:nrow(RA33_peptide_list_decreased_PAD4)) %>%
+    separate(Modifications, c("Mods_Num","Mod_1","Mod_2","Mod_3")) %>%
+    mutate(Mods_Num = gsub("xDeamidated","",Mods_Num)) %>%
+    mutate(Mod_1 = as.numeric(gsub("R","",Mod_1))) %>%
+    mutate(Mod_2 = as.numeric(gsub("R","",Mod_2))) %>%
+    mutate(Mod_3 = as.numeric(gsub("R","",Mod_3))) %>%
+    mutate(Cit_Sequence = Sequence) 
+
+cit_mod_pos <- matrix(nrow = length(RA33_peptide_list_decreased_PAD4$Mod_1), ncol = as.numeric(max(max(RA33_peptide_list_decreased_PAD4$Mods_Num, na.rm = TRUE),2)))
+
+cit_mod_pos[,1] <- RA33_peptide_list_decreased_PAD4$Mod_1
+cit_mod_pos[,2] <- RA33_peptide_list_decreased_PAD4$Mod_2
+
+RA33_peptide_list_decreased_PAD4$Cit_Sequence <- citrullinate(RA33_peptide_list_decreased_PAD4$Sequence,cit_mod_pos)
+
+RA33_peptide_list_decreased_PAD4$Cit_Sequence <- RA33_peptide_list_decreased_PAD4$Sequence
+
+write_xlsx(list(RA33_PAD4_increased = RA33_peptide_list_increased_PAD4, RA33_PAD4_decreased = RA33_peptide_list_decreased_PAD4), "netMHC_input.xlsx")
+
+    # netMHCII alleles - DRB1_0101,DRB1_0401,DRB1_0405,DRB1_0103,DRB1_0402,DRB1_1302
+
+# Nat vs PAD2 RA33 - post-NetMHCII
+
+## Increased
+
+RA33_increased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "RA33_PAD4_incr")
+RA33_increased_PAD4_NetMHCII <- RA33_increased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+RA33_increased_PAD4_high_affinity <- filter(RA33_increased_PAD4_NetMHCII, affinity <= 500)
+
+RA33_increased_PAD4_NetMHCII_unique <- merge(summarise(RA33_increased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(RA33_increased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+RA33_increased_PAD4_NetMHCII_unique <- RA33_increased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+## Decreased
+
+RA33_decreased_PAD4_NetMHCII <- read_xlsx("NetMHCII_results.xlsx", sheet = "RA33_PAD4_decr")
+RA33_decreased_PAD4_NetMHCII <- RA33_decreased_PAD4_NetMHCII %>%
+    select(c(Allele,pos,peptide,core,`affinity(nM)`)) %>%
+    filter(str_detect(Allele, "DRB1")) %>%
+    filter(!str_detect(Allele, "\\.")) %>%
+    mutate(SE = ifelse(grepl("0101|0401|0405",Allele),1,0)) %>% 
+    group_by(Allele, SE, .drop = FALSE, .add = TRUE) %>%
+    mutate(affinity = as.numeric(`affinity(nM)`))
+
+RA33_decreased_PAD4_high_affinity <- filter(RA33_decreased_PAD4_NetMHCII, affinity <= 500)
+
+RA33_decreased_PAD4_NetMHCII_unique <- merge(summarise(RA33_decreased_PAD4_high_affinity, high_affinity_cores = n_distinct(core)), summarise(RA33_decreased_PAD4_NetMHCII, total_cores = n_distinct(core)))
+
+RA33_decreased_PAD4_NetMHCII_unique <- RA33_decreased_PAD4_NetMHCII_unique %>%
+    mutate(percent_unique = high_affinity_cores/total_cores*100) %>%
+    arrange(desc(SE))
+
+```
+
+```{r RA33 PAD4 increased unique cores plot, echo= FALSE}
+
+ggplot(RA33_increased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```
+\clearpage
+
+```{r RA33 PAD4 decreased unique cores plot, echo= FALSE}
+
+ggplot(RA33_decreased_PAD4_NetMHCII_unique,aes(x= reorder(Allele,-SE), y=percent_unique)) + geom_col() 
+
+```

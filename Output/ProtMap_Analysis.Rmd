@@ -1,0 +1,339 @@
+---
+title: "ProtMap Analysis"
+author: "Ashley M Curran"
+date: "9/23/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/ashleycurran/Desktop/ProtMap_Analysis/Data",echo = TRUE) #set wd for entire notebook here
+
+#first run install.packages("pacman") and library("pacman")
+pacman::p_load(tidyverse,readxl,knitr,ggplot2,EnhancedVolcano,multtest,mutoss,ggVennDiagram)
+```
+# Vimentin
+```{r vimentin data cleanup, include=FALSE}
+vim_data_full <- read_xlsx("Vimentin_CatBSH_results_102020.xlsx", sheet = "TMT group2(vimentin)_peptide") #specify Excel doc and sheet containing peptides & abundances
+names(vim_data_full) <- str_replace_all(names(vim_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+vim_data_full <- subset(vim_data_full, Master_Protein_Accessions == "P08670") #subset the data.frame keeping only peptides from vimentin - accession number P08670 (replace with protein of interest)
+vim_data_full <- vim_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("P08670 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) #Calculate peptide length
+
+vim_data <- subset(vim_data_full,select = c("Annotated_Sequence","126_Native_vimentin_replicate_1","127N_Native_vimentin_replicate_2","127C_Native_vimentin_replicate_3","128N_PAD2-citrullinated_vimentin_replicate_1","128C_PAD2-citrullinated_vimentin_replicate_2","129N_PAD2-citrullinated_vimentin_replicate_3","129C_PAD4-citrullinated_vimentin_replicate_1","130N_PAD4-citrullinated_vimentin_replicate_2","130C_PAD4-citrullinated_vimentin_replicate_3" )) #make new data.frame with only peptide sequences and abundances
+
+vim_data$generated_uid <- 1:nrow(vim_data) #add numeric index
+vim_data <- vim_data %>%
+    select(generated_uid, everything()) #move index to first column
+    
+vim_data_native_v_PAD2 <- na.omit(vim_data[,c(1,3:8)]) #subset native and PAD2 abundances;remove any rows containing NA values (or else fail t.test)
+vim_data_native_v_PAD2_t.test <- cbind(vim_data_native_v_PAD2$generated_uid, log10(vim_data_native_v_PAD2[,2:7])) #make data.frame with log10 transformed data for t.test
+
+vim_data_native_v_PAD4 <- na.omit(vim_data[,c(1,3:5,9:11)]) #subset native and PAD4 abundances;remove any rows containing NA values (or else fail t.test)
+vim_data_native_v_PAD4_t.test <- cbind(vim_data_native_v_PAD4$generated_uid, log10(vim_data_native_v_PAD4[,2:7])) #make data.frame with log10 transformed data for t.test
+
+vim_data_native_v_PAD2_t.test$p.value <- apply(vim_data_native_v_PAD2_t.test,1,function(x)  t.test(x[2:4],x[5:7],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD2)
+
+vim_data_native_v_PAD4_t.test$p.value <- apply(vim_data_native_v_PAD4_t.test,1,function(x)  t.test(x[2:4],x[5:7],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD4)
+
+##Nat vs. PAD2
+
+vim_nat_PAD2_p.value_vector <- as.numeric(vim_data_native_v_PAD2_t.test$p.value)
+q_value <- multiple.down(vim_nat_PAD2_p.value_vector, alpha = 0.05)
+vim_data_native_v_PAD2_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+vim_data_native_v_PAD2_t.test$neg_log_q <- -(log10(vim_data_native_v_PAD2_t.test$q_value))
+
+vim_nat2 <- vim_data_native_v_PAD2[,2:4]
+vim_nat2$Nat2Mean <- rowMeans(vim_nat2)
+
+vim_PAD2 <- vim_data_native_v_PAD2[,5:7]
+vim_PAD2$PAD2Mean <- rowMeans(vim_PAD2)
+
+vim_data_native_v_PAD2$Nat2Mean <- vim_nat2$Nat2Mean
+vim_data_native_v_PAD2$PAD2Mean <- vim_PAD2$PAD2Mean
+
+vim_data_native_v_PAD2$foldchange <- vim_data_native_v_PAD2$PAD2Mean/vim_data_native_v_PAD2$Nat2Mean
+
+
+vim_data_native_v_PAD2$log2foldchange <- log2(vim_data_native_v_PAD2$PAD2Mean/vim_data_native_v_PAD2$Nat2Mean)
+
+##Nat vs. PAD4
+
+vim_nat_PAD4_p.value_vector <- as.numeric(vim_data_native_v_PAD4_t.test$p.value)
+q_value <- multiple.down(vim_nat_PAD4_p.value_vector, alpha = 0.05)
+vim_data_native_v_PAD4_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+vim_data_native_v_PAD4_t.test$neg_log_q <- -(log10(vim_data_native_v_PAD4_t.test$q_value))
+
+vim_nat4 <- vim_data_native_v_PAD4[,2:4]
+vim_nat4$Nat4Mean <- rowMeans(vim_nat4)
+
+vim_PAD4 <- vim_data_native_v_PAD4[,5:7]
+vim_PAD4$PAD4Mean <- rowMeans(vim_PAD4)
+
+vim_data_native_v_PAD4$Nat4Mean <- vim_nat4$Nat4Mean
+vim_data_native_v_PAD4$PAD4Mean <- vim_PAD4$PAD4Mean
+
+vim_data_native_v_PAD4$foldchange <- vim_data_native_v_PAD4$PAD4Mean/vim_data_native_v_PAD4$Nat4Mean
+
+
+vim_data_native_v_PAD4$log2foldchange <- log2(vim_data_native_v_PAD4$PAD4Mean/vim_data_native_v_PAD4$Nat4Mean)
+
+# vim_data_native_v_PAD2$log2foldchange <- log2(vim_data_native_v_PAD2$fold_change)
+
+# vim_native_v_PAD2_volcano <- as.data.frame(cbind(fold_change = log2(vim_native_v_PAD2_means$fold_change), neg_log_q = # vim_data_native_v_PAD2$neg_log_q))
+
+        #Positions_in_Master_Proteins = gsub("P08670 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+
+#t.test(vim_data_native_v_PAD2[1,1:3],vim_data_native_v_PAD2[1,4:6]) #t.test on first row only for test
+    
+```
+
+## Native vs PAD2-citrullinated Vimentin - Volcano Plots
+$$\\[0.25in]$$
+
+```{r vimentin mixed volcano plot PAD2, echo=FALSE}
+
+mixed_volcano_PAD2 <- as.data.frame(cbind(generated_uid = vim_data_native_v_PAD2$generated_uid, neg_log_q = vim_data_native_v_PAD2_t.test$neg_log_q, log2foldchange = vim_data_native_v_PAD2$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD2, aes(x=log2foldchange, y=neg_log_q)) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red")
+
+V4_peptide_list_increased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+V4_peptide_list_decreased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+\clearpage
+
+## Native vs PAD4-citrullinated Vimentin - Volcano Plots
+
+$$\\[0.25in]$$ 
+
+```{r vimentin mixed volcano plot PAD4, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = vim_data_native_v_PAD4$generated_uid, neg_log_q = vim_data_native_v_PAD4_t.test$neg_log_q, log2foldchange = vim_data_native_v_PAD4$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q)) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red")
+
+V4_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+V4_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+
+\clearpage
+
+```{r vimentin Venn Diagram, echo = FALSE}
+
+compare_Venn <- list(PAD2 = V4_peptide_list_increased_PAD2$generated_uid, PAD4 = V4_peptide_list_increased_PAD4$generated_uid)
+
+ggVennDiagram(compare_Venn)
+
+join <- inner_join(V4_peptide_list_increased_PAD2,vim_data, by = "generated_uid")
+```
+
+
+# Fibrinogen
+```{r fibrinogen data cleanup, include=FALSE}
+fib_data_full <- read_xlsx("Fibrinogen_CatBSH_results_102020.xlsx", sheet = "TMT group3(fibrinogen)_peptide") #specify Excel doc and sheet containing peptides & abundances
+names(fib_data_full) <- str_replace_all(names(fib_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+fib_data_full <- subset(fib_data_full, Master_Protein_Accessions == "P02671" | Master_Protein_Accessions == "P02675" | Master_Protein_Accessions == "P02679") #subset the data.frame keeping only peptides from fibrinogen - accession numbers P02671, P02675, and P02679 (replace with protein of interest)
+fib_data_full <- fib_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("P02671 ","",Positions_in_Master_Proteins)) %>%
+    mutate(Positions_in_Master_Proteins = gsub("P02675 ","",Positions_in_Master_Proteins)) %>%
+    mutate(Positions_in_Master_Proteins = gsub("P02679 ","",Positions_in_Master_Proteins)) %>%
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    #remove string referring to accession number from this column
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Master_Protein_Accessions,Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) #Calculate peptide length
+
+fib_data <- subset(fib_data_full,select = c("Annotated_Sequence","126_Native_fibrinogen_replicate_1","127N_Native_fibrinogen_replicate_2","127C_Native_fibrinogen_replicate_3","128N_PAD2-citrullinated_fibrinogen_replicate_1","128C_PAD2-citrullinated_fibrinogen_replicate_2","129N_PAD2-citrullinated_fibrinogen_replicate_3","129C_PAD4-citrullinated_fibrinogen_replicate_1","130N_PAD4-citrullinated_fibrinogen_replicate_2","130C_PAD4-citrullinated_fibrinogen_replicate_3")) #make new data.frame with only peptide sequences and abundances
+
+fib_data$generated_uid <- 1:nrow(fib_data) #add numeric index
+fib_data <- fib_data %>%
+    select(generated_uid, everything()) #move index to first column
+    
+fib_data_native_v_PAD2 <- na.omit(fib_data[,c(1,3:8)]) #subset native and PAD2 abundances;remove any rows containing NA values (or else fail t.test)
+fib_data_native_v_PAD2_t.test <- cbind(fib_data_native_v_PAD2$generated_uid, log10(fib_data_native_v_PAD2[,2:7])) #make data.frame with log10 transformed data for t.test
+
+fib_data_native_v_PAD4 <- na.omit(fib_data[,c(1,3:5,9:11)]) #subset native and PAD4 abundances;remove any rows containing NA values (or else fail t.test)
+fib_data_native_v_PAD4_t.test <- cbind(fib_data_native_v_PAD4$generated_uid, log10(fib_data_native_v_PAD4[,2:7])) #make data.frame with log10 transformed data for t.test
+
+fib_data_native_v_PAD2_t.test$p.value <- apply(fib_data_native_v_PAD2_t.test,1,function(x)  t.test(x[2:4],x[5:7],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD2)
+
+fib_data_native_v_PAD4_t.test$p.value <- apply(fib_data_native_v_PAD4_t.test,1,function(x)  t.test(x[2:4],x[5:7],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. PAD4)
+
+##Nat vs. PAD2
+
+fib_nat_PAD2_p.value_vector <- as.numeric(fib_data_native_v_PAD2_t.test$p.value)
+q_value <- multiple.down(fib_nat_PAD2_p.value_vector, alpha = 0.05)
+fib_data_native_v_PAD2_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+fib_data_native_v_PAD2_t.test$neg_log_q <- -(log10(fib_data_native_v_PAD2_t.test$q_value))
+
+fib_nat2 <- fib_data_native_v_PAD2[,2:4]
+fib_nat2$Nat2Mean <- rowMeans(fib_nat2)
+
+fib_PAD2 <- fib_data_native_v_PAD2[,5:7]
+fib_PAD2$PAD2Mean <- rowMeans(fib_PAD2)
+
+fib_data_native_v_PAD2$Nat2Mean <- fib_nat2$Nat2Mean
+fib_data_native_v_PAD2$PAD2Mean <- fib_PAD2$PAD2Mean
+
+fib_data_native_v_PAD2$foldchange <- fib_data_native_v_PAD2$PAD2Mean/fib_data_native_v_PAD2$Nat2Mean
+
+
+fib_data_native_v_PAD2$log2foldchange <- log2(fib_data_native_v_PAD2$PAD2Mean/fib_data_native_v_PAD2$Nat2Mean)
+
+##Nat vs. PAD4
+
+fib_nat_PAD4_p.value_vector <- as.numeric(fib_data_native_v_PAD4_t.test$p.value)
+q_value <- multiple.down(fib_nat_PAD4_p.value_vector, alpha = 0.05)
+fib_data_native_v_PAD4_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+fib_data_native_v_PAD4_t.test$neg_log_q <- -(log10(fib_data_native_v_PAD4_t.test$q_value))
+
+fib_nat4 <- fib_data_native_v_PAD4[,2:4]
+fib_nat4$Nat4Mean <- rowMeans(fib_nat4)
+
+fib_PAD4 <- fib_data_native_v_PAD4[,5:7]
+fib_PAD4$PAD4Mean <- rowMeans(fib_PAD4)
+
+fib_data_native_v_PAD4$Nat4Mean <- fib_nat4$Nat4Mean
+fib_data_native_v_PAD4$PAD4Mean <- fib_PAD4$PAD4Mean
+
+fib_data_native_v_PAD4$foldchange <- fib_data_native_v_PAD4$PAD4Mean/fib_data_native_v_PAD4$Nat4Mean
+
+
+fib_data_native_v_PAD4$log2foldchange <- log2(fib_data_native_v_PAD4$PAD4Mean/fib_data_native_v_PAD4$Nat4Mean)
+    
+```
+
+## Native vs PAD2-citrullinated Fibrinogen - Volcano Plots
+$$\\[0.25in]$$
+
+```{r fibrinogen mixed volcano plot, echo=FALSE}
+
+mixed_volcano_PAD2 <- as.data.frame(cbind(generated_uid = fib_data_native_v_PAD2$generated_uid, neg_log_q = fib_data_native_v_PAD2_t.test$neg_log_q, log2foldchange = fib_data_native_v_PAD2$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD2, aes(x=log2foldchange, y=neg_log_q)) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red")
+
+V4_peptide_list_increased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+V4_peptide_list_decreased_PAD2 <- subset(mixed_volcano_PAD2, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+\clearpage
+
+## Native vs PAD4-citrullinated Fibrinogen - Volcano Plots
+
+$$\\[0.25in]$$ 
+
+```{r fibrinogen mixed volcano plot PAD4, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = fib_data_native_v_PAD4$generated_uid, neg_log_q = fib_data_native_v_PAD4_t.test$neg_log_q, log2foldchange = fib_data_native_v_PAD4$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q)) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red")
+
+V4_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+V4_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
+
+\clearpage
+
+```{r fibrinogen Venn Diagram, echo = FALSE}
+
+compare_Venn <- list(PAD2 = V4_peptide_list_increased_PAD2$generated_uid, PAD4 = V4_peptide_list_increased_PAD4$generated_uid)
+
+ggVennDiagram(compare_Venn)
+
+join <- inner_join(V4_peptide_list_increased_PAD2,vim_data, by = "generated_uid")
+```
+
+
+# PAD4
+```{r PAD4 data cleanup, include=FALSE}
+PAD4_data_full <- read_xlsx("PAD4_CatBSH_results_102020.xlsx", sheet = "TMT group1(PAD4)_peptide") #specify Excel doc and sheet containing peptides & abundances
+names(PAD4_data_full) <- str_replace_all(names(PAD4_data_full), c(" "= "_", "," ="")) #replace spaces with underscores in column names
+PAD4_data_full <- subset(PAD4_data_full, Master_Protein_Accessions == "Q9UM07") #subset the data.frame keeping only peptides from vimentin - accession number P08670 (replace with protein of interest)
+PAD4_data_full <- PAD4_data_full %>%
+    mutate(Positions_in_Master_Proteins = gsub("Q9UM07 ","",Positions_in_Master_Proteins)) %>% #remove string referring to accession number from this column
+    mutate(Positions_in_Master_Proteins = gsub("\\[|\\]","",Positions_in_Master_Proteins)) %>%
+    separate(Positions_in_Master_Proteins, c("Start","End")) %>% #now separate this column into start and end positions of peptides
+    mutate(Start = as.numeric(Start)) %>% 
+    mutate(End = as.numeric(End)) %>%
+    arrange(Start,End) %>% #sort first by Start and then by End to order peptides
+    rowwise() %>% 
+    mutate(Length = (End-Start)+1,.after = End) #Calculate peptide length
+
+PAD4_data <- subset(PAD4_data_full,select = c("Annotated_Sequence","126_Native_PAD4_replicate_1","127N_Native_PAD4_replicate_2","127C_Native_PAD4_replicate_3","128N_Auto-citrullinated_PAD4_replicate_1","128C_Auto-citrullinated_PAD4_replicate_2","129N_Auto-citrullinated_PAD4_replicate_3")) #make new data.frame with only peptide sequences and abundances
+
+PAD4_data$generated_uid <- 1:nrow(PAD4_data) #add numeric index
+PAD4_data <- PAD4_data %>%
+    select(generated_uid, everything()) #move index to first column
+    
+PAD4_data_native_v_auto <- na.omit(PAD4_data[,c(1,3:8)]) #subset native and auto-cit abundances;remove any rows containing NA values (or else fail t.test)
+PAD4_data_native_v_auto_t.test <- cbind(PAD4_data_native_v_auto$generated_uid, log10(PAD4_data_native_v_auto[,2:7])) #make data.frame with log10 transformed data for t.test
+
+PAD4_data_native_v_auto_t.test$p.value <- apply(PAD4_data_native_v_auto_t.test,1,function(x)  t.test(x[2:4],x[5:7],var.equal=TRUE)$p.value) #run t.test on each row and add column with p value (nat vs. auto-cit)
+
+##Nat vs. Auto-cit
+
+PAD4_nat_auto_p.value_vector <- as.numeric(PAD4_data_native_v_auto_t.test$p.value)
+q_value <- multiple.down(PAD4_nat_auto_p.value_vector, alpha = 0.05)
+PAD4_data_native_v_auto_t.test$q_value <- as.numeric(q_value[["adjPValues"]])
+PAD4_data_native_v_auto_t.test$neg_log_q <- -(log10(PAD4_data_native_v_auto_t.test$q_value))
+
+PAD4_nat <- PAD4_data_native_v_auto[,2:4]
+PAD4_nat$NatMean <- rowMeans(PAD4_nat)
+
+PAD4_auto <- PAD4_data_native_v_auto[,5:7]
+PAD4_auto$AutoMean <- rowMeans(PAD4_auto)
+
+PAD4_data_native_v_auto$NatMean <- PAD4_nat$NatMean
+PAD4_data_native_v_auto$AutoMean <- PAD4_auto$AutoMean
+
+PAD4_data_native_v_auto$foldchange <- PAD4_data_native_v_auto$AutoMean/PAD4_data_native_v_auto$NatMean
+
+
+PAD4_data_native_v_auto$log2foldchange <- log2(PAD4_data_native_v_auto$AutoMean/PAD4_data_native_v_auto$NatMean)
+
+    
+```
+
+## Native vs Auto-citrullinated PAD4 - Volcano Plots
+$$\\[0.25in]$$
+
+```{r PAD4 mixed volcano plot, echo=FALSE}
+
+mixed_volcano_PAD4 <- as.data.frame(cbind(generated_uid = PAD4_data_native_v_auto$generated_uid, neg_log_q = PAD4_data_native_v_auto_t.test$neg_log_q, log2foldchange = PAD4_data_native_v_auto$log2foldchange))
+
+ggplot(data=mixed_volcano_PAD4, aes(x=log2foldchange, y=neg_log_q)) + geom_point() + theme_minimal() + geom_vline(xintercept=c(-1, 1), col="red") + geom_hline(yintercept=-log10(0.05), col="red")
+
+V4_peptide_list_increased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange >= 1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+V4_peptide_list_decreased_PAD4 <- subset(mixed_volcano_PAD4, neg_log_q >= 1.3 & log2foldchange <= -1, select= c(generated_uid,neg_log_q,log2foldchange))
+
+#Volcano plot V4 = no data transformation of means, log10 transform data before t.test, plot log2FC
+
+```
